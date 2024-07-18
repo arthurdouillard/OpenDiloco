@@ -12,6 +12,8 @@ from hivemind.optim.optimizer import logger
 
 def ddp_setup():
     init_process_group(backend="gloo")
+    if torch.cuda.is_available():
+        torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
 
 
 def log(message):
@@ -28,7 +30,7 @@ def custom_post_localSGD_hook(state: PostLocalSGDState, bucket) -> torch.futures
 def train(
     lr: float = 4e-4, total_batch_size: int = 512, per_device_train_batch_size: int = 32, max_steps: int | None = None
 ):
-    _local_rank = int(os.environ["LOCAL_RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     _rank = int(os.environ["RANK"])
 
@@ -43,8 +45,15 @@ def train(
 
     model = torch.nn.Linear(INPUT_DIM, OUTPUT_DIM)
 
+    cuda_available = torch.cuda.is_available()
+    device = torch.device("cuda" if cuda_available else "cpu")
+
     # model = FSDP(model, sharding_strategy=ShardingStrategy.NO_SHARD, use_orig_params=True, device_id="cpu")
-    model = DDP(model)
+
+    model = model.to(device)
+    model = DDP(
+        model, device_ids=[local_rank] if cuda_available else None, output_device=local_rank if cuda_available else None
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1, betas=(0.9, 0.95))
     model.train()
@@ -57,8 +66,8 @@ def train(
         real_step = (step + 1) // gradient_accumulation_steps
         is_accumulating = bool((step + 1) % gradient_accumulation_steps)
 
-        input = torch.rand(per_device_train_batch_size, INPUT_DIM)
-        target = torch.randint(0, OUTPUT_DIM, (per_device_train_batch_size,))
+        input = torch.rand(per_device_train_batch_size, INPUT_DIM).to(device)
+        target = torch.randint(0, OUTPUT_DIM, (per_device_train_batch_size,)).to(device)
 
         with model.no_sync() if is_accumulating else nullcontext():
             output = model(input)
