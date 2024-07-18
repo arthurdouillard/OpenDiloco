@@ -4,10 +4,8 @@ from contextlib import nullcontext
 import torch
 from pydantic_config import parse_argv, validate_call
 from torch.distributed import destroy_process_group, init_process_group
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    ShardingStrategy,
-)
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.algorithms.ddp_comm_hooks.post_localSGD_hook import post_localSGD_hook, PostLocalSGDState
 
 from hivemind.optim.optimizer import logger
 
@@ -18,6 +16,12 @@ def ddp_setup():
 
 def log(message):
     logger.info(f"[rank {os.environ['LOCAL_RANK']}] {message}")
+
+
+def custom_post_localSGD_hook(state: PostLocalSGDState, bucket) -> torch.futures.Future[torch.Tensor]:
+    log(f"bucket: {bucket}")
+    1 / 0
+    return post_localSGD_hook(state, bucket)
 
 
 @validate_call
@@ -39,11 +43,15 @@ def train(
 
     model = torch.nn.Linear(INPUT_DIM, OUTPUT_DIM)
 
-    model = FSDP(model, sharding_strategy=ShardingStrategy.NO_SHARD, use_orig_params=True, device_id="cpu")
+    # model = FSDP(model, sharding_strategy=ShardingStrategy.NO_SHARD, use_orig_params=True, device_id="cpu")
+    model = DDP(model)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1, betas=(0.9, 0.95))
     model.train()
     loss_batch = 0
+
+    state = PostLocalSGDState(process_group=None, subgroup=None, start_localSGD_iter=0)
+    model.register_comm_hook(state=state, hook=custom_post_localSGD_hook)
 
     for step in range(10000):
         real_step = (step + 1) // gradient_accumulation_steps
@@ -58,8 +66,6 @@ def train(
             loss = torch.nn.functional.cross_entropy(output, target)
             loss = loss / gradient_accumulation_steps
             loss_batch += loss.detach()
-
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
             optimizer.step()
             optimizer.zero_grad()
